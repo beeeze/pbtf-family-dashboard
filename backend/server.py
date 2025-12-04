@@ -1,7 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
@@ -11,18 +10,57 @@ import uuid
 from datetime import datetime
 import requests
 from collections import defaultdict
+import sqlite3
+import json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# SQLite connection
+DB_PATH = ROOT_DIR / 'pbtf_database.db'
+
+def get_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    # Create tables
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS status_checks (
+            id TEXT PRIMARY KEY,
+            client_name TEXT,
+            timestamp TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS patient_families_cache (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            contact_type TEXT,
+            created_date TEXT,
+            tags TEXT,
+            updated_at TEXT,
+            last_engagement_date TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sync_state (
+            id TEXT PRIMARY KEY,
+            last_synced_contact_count INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Initialize database on startup
+init_db()
 
 # Virtuous API Configuration
 VIRTUOUS_API_KEY = os.environ.get('VIRTUOUS_API_KEY', '')
-VIRTUOUS_BASE_URL = 'https://api.virtuouscrm.com/api'
+VIRTUOUS_BASE_URL = 'https://api.virtuoussoftware.com/api'
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -107,15 +145,25 @@ async def root():
 
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
+    status_obj = StatusCheck(client_name=input.client_name)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO status_checks (id, client_name, timestamp) VALUES (?, ?, ?)',
+        (status_obj.id, status_obj.client_name, status_obj.timestamp.isoformat())
+    )
+    conn.commit()
+    conn.close()
     return status_obj
 
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, client_name, timestamp FROM status_checks LIMIT 1000')
+    rows = cursor.fetchall()
+    conn.close()
+    return [StatusCheck(id=row['id'], client_name=row['client_name'], timestamp=datetime.fromisoformat(row['timestamp'])) for row in rows]
 
 # ==================== Virtuous API Proxy ====================
 
@@ -141,15 +189,22 @@ async def sync_patient_families(request: SyncRequest):
     """Handle patient family sync operations"""
     try:
         action = request.action
+        conn = get_db()
+        cursor = conn.cursor()
         
         if action == 'get-state':
             # Get sync state
-            sync_state = await db.sync_state.find_one({'_id': 'patient_families_sync'})
-            total_contacts = await db.patient_families_cache.count_documents({})
+            cursor.execute('SELECT last_synced_contact_count FROM sync_state WHERE id = ?', ('patient_families_sync',))
+            row = cursor.fetchone()
+            sync_state = {'last_synced_contact_count': row['last_synced_contact_count']} if row else {}
+            
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+            total_contacts = cursor.fetchone()['count']
+            conn.close()
             
             return {
                 'success': True,
-                'syncState': sync_state or {},
+                'syncState': sync_state,
                 'totalContacts': total_contacts
             }
         
@@ -159,20 +214,24 @@ async def sync_patient_families(request: SyncRequest):
             
             if request.reset:
                 # Reset sync state
-                await db.sync_state.update_one(
-                    {'_id': 'patient_families_sync'},
-                    {'$set': {'last_synced_contact_count': 50}},
-                    upsert=True
+                cursor.execute(
+                    'INSERT OR REPLACE INTO sync_state (id, last_synced_contact_count) VALUES (?, ?)',
+                    ('patient_families_sync', 50)
                 )
+                conn.commit()
+                cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+                cached_count = cursor.fetchone()['count']
+                conn.close()
                 return {
                     'success': True,
                     'nextSkip': 50,
-                    'cachedCount': await db.patient_families_cache.count_documents({})
+                    'cachedCount': cached_count
                 }
             
             # Get current state
-            sync_state = await db.sync_state.find_one({'_id': 'patient_families_sync'}) or {}
-            skip = sync_state.get('last_synced_contact_count', 0)
+            cursor.execute('SELECT last_synced_contact_count FROM sync_state WHERE id = ?', ('patient_families_sync',))
+            row = cursor.fetchone()
+            skip = row['last_synced_contact_count'] if row else 0
             take = 50
             
             # Fetch from Virtuous API
@@ -185,32 +244,34 @@ async def sync_patient_families(request: SyncRequest):
             total = virtuous_data.get('total', 0)
             contacts = virtuous_data.get('list', [])
             
-            # Cache contacts in MongoDB
+            # Cache contacts in SQLite
             for contact in contacts:
-                await db.patient_families_cache.update_one(
-                    {'id': contact['id']},
-                    {'$set': {
-                        'id': contact['id'],
-                        'name': contact.get('name', ''),
-                        'contactType': contact.get('contactType'),
-                        'created_date': contact.get('createdDate'),
-                        'tags': contact.get('tags', []),
-                        'updated_at': datetime.utcnow()
-                    }},
-                    upsert=True
-                )
+                cursor.execute('''
+                    INSERT OR REPLACE INTO patient_families_cache 
+                    (id, name, contact_type, created_date, tags, updated_at) 
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    contact['id'],
+                    contact.get('name', ''),
+                    contact.get('contactType'),
+                    contact.get('createdDate'),
+                    json.dumps(contact.get('tags', [])),
+                    datetime.utcnow().isoformat()
+                ))
             
             next_skip = skip + len(contacts)
             complete = next_skip >= total
             
             # Update sync state
-            await db.sync_state.update_one(
-                {'_id': 'patient_families_sync'},
-                {'$set': {'last_synced_contact_count': next_skip if not complete else total}},
-                upsert=True
+            cursor.execute(
+                'INSERT OR REPLACE INTO sync_state (id, last_synced_contact_count) VALUES (?, ?)',
+                ('patient_families_sync', next_skip if not complete else total)
             )
+            conn.commit()
             
-            cached_count = await db.patient_families_cache.count_documents({})
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+            cached_count = cursor.fetchone()['count']
+            conn.close()
             
             return {
                 'success': True,
@@ -226,8 +287,11 @@ async def sync_patient_families(request: SyncRequest):
             batch_size = request.batchSize or 50
             
             # Get batch of families
-            families = await db.patient_families_cache.find().skip(offset).limit(batch_size).to_list(batch_size)
-            total_cached = await db.patient_families_cache.count_documents({})
+            cursor.execute('SELECT id, name FROM patient_families_cache LIMIT ? OFFSET ?', (batch_size, offset))
+            families = [dict(row) for row in cursor.fetchall()]
+            
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+            total_cached = cursor.fetchone()['count']
             
             # Fetch latest engagement data for each family
             for family in families:
@@ -241,12 +305,15 @@ async def sync_patient_families(request: SyncRequest):
                     if engagements:
                         latest_date = max([e.get('date') for e in engagements if e.get('date')], default=None)
                         if latest_date:
-                            await db.patient_families_cache.update_one(
-                                {'id': family['id']},
-                                {'$set': {'last_engagement_date': latest_date}}
+                            cursor.execute(
+                                'UPDATE patient_families_cache SET last_engagement_date = ? WHERE id = ?',
+                                (latest_date, family['id'])
                             )
                 except Exception as e:
                     logger.error(f"Error refreshing dates for family {family['id']}: {str(e)}")
+            
+            conn.commit()
+            conn.close()
             
             next_offset = offset + len(families)
             complete = next_offset >= total_cached
@@ -264,15 +331,16 @@ async def sync_patient_families(request: SyncRequest):
             fiscal_year_end = datetime.fromisoformat(request.fiscalYearEnd.replace('Z', '+00:00'))
             
             # Get all families
-            total_families = await db.patient_families_cache.count_documents({})
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+            total_families = cursor.fetchone()['count']
             
             # Families created in fiscal year
-            total_in_fiscal_year = await db.patient_families_cache.count_documents({
-                'created_date': {
-                    '$gte': fiscal_year_start.isoformat(),
-                    '$lte': fiscal_year_end.isoformat()
-                }
-            })
+            cursor.execute(
+                'SELECT COUNT(*) as count FROM patient_families_cache WHERE created_date >= ? AND created_date <= ?',
+                (fiscal_year_start.isoformat(), fiscal_year_end.isoformat())
+            )
+            total_in_fiscal_year = cursor.fetchone()['count']
+            conn.close()
             
             # For now, return basic metrics - you can expand this based on your engagement data structure
             return {
@@ -348,12 +416,31 @@ async def get_patient_families(
 ):
     """Get patient families from cache"""
     try:
-        query = {}
-        if search:
-            query['name'] = {'$regex': search, '$options': 'i'}
+        conn = get_db()
+        cursor = conn.cursor()
         
-        families = await db.patient_families_cache.find(query).sort('name').skip(skip).limit(limit).to_list(limit)
-        total = await db.patient_families_cache.count_documents(query)
+        if search:
+            cursor.execute(
+                'SELECT * FROM patient_families_cache WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?',
+                (f'%{search}%', limit, skip)
+            )
+            families = [dict(row) for row in cursor.fetchall()]
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache WHERE name LIKE ?', (f'%{search}%',))
+        else:
+            cursor.execute('SELECT * FROM patient_families_cache ORDER BY name LIMIT ? OFFSET ?', (limit, skip))
+            families = [dict(row) for row in cursor.fetchall()]
+            cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+        
+        total = cursor.fetchone()['count']
+        conn.close()
+        
+        # Parse tags JSON for each family
+        for family in families:
+            if family.get('tags'):
+                try:
+                    family['tags'] = json.loads(family['tags'])
+                except:
+                    family['tags'] = []
         
         return {
             'families': families,
@@ -369,20 +456,32 @@ async def get_patient_families(
 async def clear_cache():
     """Clear all cached data"""
     try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Count before deleting
+        cursor.execute('SELECT COUNT(*) as count FROM patient_families_cache')
+        families_count = cursor.fetchone()['count']
+        cursor.execute('SELECT COUNT(*) as count FROM sync_state')
+        sync_count = cursor.fetchone()['count']
+        
         # Clear patient families cache
-        result1 = await db.patient_families_cache.delete_many({})
+        cursor.execute('DELETE FROM patient_families_cache')
         
         # Clear sync state
-        result2 = await db.sync_state.delete_many({})
+        cursor.execute('DELETE FROM sync_state')
         
-        logger.info(f"Cache cleared: {result1.deleted_count} families, {result2.deleted_count} sync states")
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Cache cleared: {families_count} families, {sync_count} sync states")
         
         return {
             'success': True,
             'message': 'Cache cleared successfully',
             'deleted': {
-                'families': result1.deleted_count,
-                'sync_states': result2.deleted_count
+                'families': families_count,
+                'sync_states': sync_count
             }
         }
     except Exception as e:
@@ -391,17 +490,14 @@ async def clear_cache():
 
 # ==================== App Setup ====================
 
-# Include the router in the main app
-app.include_router(api_router)
-
+# Add CORS middleware first (before routes)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=["*"],  # Allow all origins for development
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+# Include the router in the main app
+app.include_router(api_router)
