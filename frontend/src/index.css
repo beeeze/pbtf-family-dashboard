@@ -1,0 +1,146 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Warm teal palette - compassionate healthcare feel */
+    --background: 210 20% 98%;
+    --foreground: 220 25% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 25% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 25% 12%;
+
+    /* Teal primary - brain tumor awareness */
+    --primary: 175 65% 35%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 15% 93%;
+    --secondary-foreground: 220 25% 20%;
+
+    --muted: 210 15% 95%;
+    --muted-foreground: 220 10% 45%;
+
+    /* Warm amber accent */
+    --accent: 38 92% 50%;
+    --accent-foreground: 220 25% 12%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 210 20% 90%;
+    --input: 210 20% 90%;
+    --ring: 175 65% 35%;
+
+    --radius: 0.75rem;
+
+    /* Chart colors */
+    --chart-teal: 175 65% 35%;
+    --chart-teal-light: 175 55% 55%;
+    --chart-amber: 38 92% 50%;
+    --chart-coral: 12 76% 61%;
+    --chart-purple: 262 60% 55%;
+    --chart-sky: 199 89% 48%;
+
+    /* Dashboard specific */
+    --kpi-positive: 142 71% 45%;
+    --kpi-negative: 0 72% 51%;
+    --kpi-neutral: 220 10% 45%;
+
+    /* Sidebar */
+    --sidebar-background: 220 25% 12%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 175 65% 45%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 18%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 220 15% 20%;
+    --sidebar-ring: 175 65% 45%;
+  }
+
+  .dark {
+    --background: 220 25% 8%;
+    --foreground: 210 20% 95%;
+
+    --card: 220 20% 12%;
+    --card-foreground: 210 20% 95%;
+
+    --popover: 220 20% 12%;
+    --popover-foreground: 210 20% 95%;
+
+    --primary: 175 60% 45%;
+    --primary-foreground: 220 25% 8%;
+
+    --secondary: 220 15% 18%;
+    --secondary-foreground: 210 20% 90%;
+
+    --muted: 220 15% 18%;
+    --muted-foreground: 210 15% 60%;
+
+    --accent: 38 85% 55%;
+    --accent-foreground: 220 25% 8%;
+
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 20%;
+    --input: 220 15% 20%;
+    --ring: 175 60% 45%;
+
+    --sidebar-background: 220 25% 6%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 175 60% 50%;
+    --sidebar-primary-foreground: 220 25% 8%;
+    --sidebar-accent: 220 20% 12%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 220 15% 15%;
+    --sidebar-ring: 175 60% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Amiri', serif;
+    font-weight: 700;
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    @apply bg-card/80 backdrop-blur-sm border border-border/50 shadow-sm;
+  }
+
+  .kpi-card {
+    @apply bg-card rounded-xl border border-border/60 shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+
+  .chart-container {
+    @apply bg-card rounded-xl border border-border/60 p-6 shadow-sm;
+  }
+
+  .dashboard-grid {
+    @apply grid gap-6;
+  }
+
+  .stat-positive {
+    @apply text-[hsl(var(--kpi-positive))];
+  }
+
+  .stat-negative {
+    @apply text-[hsl(var(--kpi-negative))];
+  }
+}
